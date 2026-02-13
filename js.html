@@ -1,0 +1,911 @@
+<script>
+// ==========================================
+// 1. GLOBAL VARIABLES
+// ==========================================
+let currentUser = null;
+let allJobs = [];
+let allUsers = [];
+let currentJobId = null;
+let isSidebarCollapsed = false;
+let currentStatusFilter = 'all';
+let currentDeptFilter = null; 
+let selectedScorecard = null; 
+
+let newProfileImageBase64 = null;
+let newProfileImageName = null;
+let adminEditUserImageBase64 = null;
+let adminEditUserImageName = null;
+
+let sortDirection = {
+    id: 1, desc: 1, pendingType: 1, pendingDesc: 1, date: 1, duration: 1, 
+    sender: 1, responsible: 1, status: 1, approver: 1, closeDate: 1, jobType: 1
+};
+
+let deptChartInstance = null;
+let agingChartInstance = null;
+
+// ==========================================
+// 2. INITIALIZATION & AUTH
+// ==========================================
+document.addEventListener('DOMContentLoaded', () => { 
+    try { 
+        const savedUser = localStorage.getItem('pea_mech_user'); 
+        const savedPass = localStorage.getItem('pea_mech_pass'); 
+        if (savedUser) { 
+            const u = document.getElementById('username'); 
+            if(u) u.value = savedUser;
+        } 
+        if (savedPass) { 
+            const p = document.getElementById('password'); 
+            const r = document.getElementById('remember-me'); 
+            if(p) p.value = atob(savedPass); 
+            if(r) r.checked = true;
+        } 
+    } catch(e){} 
+});
+
+function handleLogin(e) {
+    e.preventDefault(); 
+    const u = document.getElementById('username'); 
+    const p = document.getElementById('password'); 
+    if(!u.value || !p.value) return; 
+    
+    document.getElementById('login-btn-text').innerText = 'กำลังตรวจสอบ...'; 
+    document.getElementById('login-spinner').classList.remove('hidden'); 
+    
+    google.script.run
+        .withSuccessHandler(res => { 
+            document.getElementById('login-spinner').classList.add('hidden'); 
+            document.getElementById('login-btn-text').innerText = 'เข้าสู่ระบบ'; 
+            if (res.status === 'success') { 
+                try { 
+                    localStorage.setItem('pea_mech_user', u.value); 
+                    if(document.getElementById('remember-me').checked) {
+                        localStorage.setItem('pea_mech_pass', btoa(p.value)); 
+                    } else {
+                        localStorage.removeItem('pea_mech_pass'); 
+                    }
+                } catch(e) {} 
+                
+                const l = document.getElementById('login-section'); 
+                l.classList.add('opacity-0', 'pointer-events-none'); 
+                setTimeout(() => { 
+                    l.classList.add('hidden'); 
+                    l.style.display = 'none'; 
+                    currentUser = res.user; 
+                    initApp(); 
+                }, 500); 
+            } else { 
+                Swal.fire({icon:'error', title:'ไม่สำเร็จ', text:res.message}); 
+            } 
+        })
+        .withFailureHandler(e => { 
+            document.getElementById('login-spinner').classList.add('hidden');
+            document.getElementById('login-btn-text').innerText = 'เข้าสู่ระบบ';
+            Swal.fire({icon:'error', title:'Connection Error', text:e.message}); 
+        })
+        .loginUser(u.value, p.value);
+}
+
+function initApp() { 
+    const a = document.getElementById('app-container'); 
+    a.classList.remove('hidden'); 
+    setTimeout(() => a.classList.add('opacity-100'), 50); 
+    
+    if(currentUser) { 
+        document.getElementById('user-name-display').innerText = currentUser.name; 
+        document.getElementById('user-role-display').innerText = `${currentUser.role} | ${currentUser.dept}`; 
+        
+        const ai = document.getElementById('user-avatar-display'); 
+        const ic = document.getElementById('user-icon-display'); 
+        
+        if (currentUser.avatar) {
+            ai.src = currentUser.avatar; 
+            ai.classList.remove('hidden'); 
+            ic.classList.add('hidden');
+        } else {
+            ai.classList.add('hidden'); 
+            ic.classList.remove('hidden');
+        } 
+        
+        const btnCreate = document.getElementById('btn-create-job'); 
+        const adminMenu = document.getElementById('admin-menu-section'); 
+        const deptFilter = document.getElementById('dept-filter-container'); 
+        
+        if(btnCreate) btnCreate.classList.add('hidden'); 
+        if(adminMenu) adminMenu.classList.add('hidden'); 
+        if(deptFilter) deptFilter.classList.add('hidden'); 
+        
+        if (['Dispatcher','Admin'].includes(currentUser.role)) { 
+            if(btnCreate) btnCreate.classList.remove('hidden'); 
+        } 
+        
+        if (currentUser.role === 'Admin') { 
+            if(adminMenu) adminMenu.classList.remove('hidden'); 
+        } 
+        
+        if (['Admin','Approver'].includes(currentUser.role)) { 
+            if(deptFilter) deptFilter.classList.remove('hidden'); 
+            currentDeptFilter = 'ผซก.1'; 
+            setDeptFilter('ผซก.1'); 
+        } else { 
+            currentDeptFilter = 'all'; 
+        } 
+    } 
+    
+    loadJobsData(); 
+    showPage('dashboard', false); 
+    
+    if(window.innerWidth >= 768) toggleSidebarDesktop();
+}
+
+function logout() { 
+    const a = document.getElementById('app-container'); 
+    a.classList.remove('opacity-100'); 
+    a.classList.add('opacity-0'); 
+    
+    setTimeout(() => {
+        a.classList.add('hidden'); 
+        const l = document.getElementById('login-section'); 
+        l.classList.remove('hidden'); 
+        l.style.display = ''; 
+        l.classList.remove('opacity-0', 'pointer-events-none'); 
+        
+        currentUser = null; 
+        currentDeptFilter = null; 
+        currentStatusFilter = 'all'; 
+        selectedScorecard = null; 
+        allJobs = [];
+        
+        try {
+            if(!document.getElementById('remember-me').checked) document.getElementById('password').value='';
+        } catch(e){} 
+        
+        updateActiveNav(document.querySelector(`button[onclick="showPage('dashboard')"]`));
+    }, 500);
+}
+
+// ==========================================
+// 3. UI CONTROLS & NAVIGATION
+// ==========================================
+function updateActiveNav(t) { 
+    document.querySelectorAll('.nav-item').forEach(e => {
+        e.classList.remove('nav-item-active');
+        e.classList.add('text-slate-500');
+    }); 
+    if(t) {
+        t.classList.remove('text-slate-500');
+        t.classList.add('nav-item-active');
+    }
+}
+
+function showPage(p, animate=true) { 
+    if ((p === 'user-management' || p === 'user-management-page') && currentUser.role !== 'Admin') {
+        Swal.fire({icon:'error',title:'ไม่มีสิทธิ์'});
+        return;
+    } 
+    
+    const tid = p.endsWith('-page') ? p : p + '-page'; 
+    const tp = document.getElementById(tid); 
+    if(!tp) return; 
+    
+    if (tid === 'user-management-page') {
+        if(allUsers.length === 0) loadUsersData(); else renderUserTable(allUsers);
+    } 
+    if (tid === 'profile-page') renderProfile(); 
+    
+    const sw = () => {
+        document.querySelectorAll('.page-section').forEach(e => {
+            e.classList.add('hidden');
+            e.classList.remove('animate-fade-in');
+        }); 
+        tp.classList.remove('hidden'); 
+        if(animate) tp.classList.add('animate-fade-in'); 
+        
+        if (window.innerWidth < 768) {
+            const s = document.getElementById('sidebar');
+            if(!s.classList.contains('-translate-x-full')) toggleSidebar();
+        }
+    }; 
+    
+    const ap = document.querySelector('.page-section:not(.hidden)'); 
+    if (ap && ap !== tp && animate) {
+        ap.classList.add('animate-fade-out'); 
+        setTimeout(() => {
+            ap.classList.remove('animate-fade-out'); 
+            sw();
+        }, 200);
+    } else {
+        sw();
+    } 
+    
+    if (p === 'dashboard') updateActiveNav(document.querySelector(`button[onclick="showPage('dashboard')"]`)); 
+    else if (p === 'user-management') updateActiveNav(document.querySelector(`button[onclick="showPage('user-management')"]`)); 
+    else if (p === 'profile') updateActiveNav(null); 
+}
+
+function toggleSidebar() { 
+    const s = document.getElementById('sidebar'); 
+    const o = document.getElementById('mobile-overlay'); 
+    const c = s.classList.contains('-translate-x-full'); 
+    if (c) { 
+        s.classList.remove('-translate-x-full'); 
+        o.classList.remove('hidden'); 
+        setTimeout(() => o.classList.remove('opacity-0'), 10); 
+    } else { 
+        s.classList.add('-translate-x-full'); 
+        o.classList.add('opacity-0'); 
+        setTimeout(() => o.classList.add('hidden'), 300); 
+    } 
+}
+
+function toggleSidebarDesktop() { 
+    const s = document.getElementById('sidebar'); 
+    const i = document.getElementById('sidebar-toggle-icon'); 
+    const t = document.querySelectorAll('.sidebar-text'); 
+    const b = document.getElementById('sidebar-toggle-btn');
+    
+    isSidebarCollapsed = !isSidebarCollapsed; 
+    
+    if (isSidebarCollapsed) { 
+        s.classList.remove('w-72'); 
+        s.classList.add('w-20'); 
+        i.classList.add('rotate-180'); 
+        t.forEach(el => { el.style.opacity = '0'; el.style.width = '0'; el.style.display = 'none'; }); 
+        
+        document.querySelectorAll('.nav-item').forEach(el => { 
+            el.classList.remove('px-3.5'); 
+            el.classList.add('justify-center', 'px-0'); 
+            const sp = el.querySelector('span'); 
+            if(sp) sp.classList.remove('ml-3'); 
+        }); 
+
+    } else { 
+        s.classList.remove('w-20'); 
+        s.classList.add('w-72'); 
+        i.classList.remove('rotate-180'); 
+        t.forEach(el => { el.style.display = 'block'; setTimeout(() => { el.style.opacity = '1'; el.style.width = 'auto'; }, 50); }); 
+        
+        document.querySelectorAll('.nav-item').forEach(el => { 
+            el.classList.remove('justify-center', 'px-0'); 
+            el.classList.add('px-3.5'); 
+            const sp = el.querySelector('span'); 
+            if(sp) sp.classList.add('ml-3'); 
+        }); 
+    } 
+}
+
+// ==========================================
+// 4. DATA LOADING
+// ==========================================
+function loadJobsData() {
+    const loadingEl = document.getElementById('loading-table');
+    if(loadingEl) loadingEl.classList.remove('hidden');
+    
+    google.script.run.withSuccessHandler(res => {
+        if(loadingEl) loadingEl.classList.add('hidden');
+        if (res.status === 'success') { 
+            allJobs = res.data || []; 
+            initDashboardFilters(allJobs); 
+            populateYearOptions(allJobs); 
+            applyFilters(); 
+            renderDashboard(allJobs); 
+        } else { 
+            Swal.fire('Data Error', res.message, 'error'); 
+        }
+    }).withFailureHandler(err => {
+        if(loadingEl) loadingEl.classList.add('hidden');
+        Swal.fire('Server Error', err.message, 'error');
+    }).getAllJobs();
+}
+
+function refreshData() {
+    const btn = event.currentTarget.querySelector('i');
+    if(btn) btn.classList.add('fa-spin');
+    loadJobsData(); 
+    if(btn) setTimeout(() => btn.classList.remove('fa-spin'), 1000);
+}
+
+// ==========================================
+// 5. DASHBOARD LOGIC (Modern Interactive)
+// ==========================================
+function initDashboardFilters(jobs) {
+    const yearSelect = document.getElementById('dash-filter-year');
+    const monthSelect = document.getElementById('dash-filter-month');
+    if(!yearSelect || !monthSelect) return;
+    
+    if (yearSelect.options.length > 0) return; 
+
+    // Extract dynamic years from data
+    const years = new Set();
+    years.add(2569); // Default
+    
+    jobs.forEach(j => {
+        const yRecv = getYearFromDate(j.date);
+        const yClose = getYearFromDate(j.closeDate);
+        if(yRecv) years.add(yRecv);
+        if(yClose) years.add(yClose);
+    });
+
+    yearSelect.innerHTML = '<option value="all">ทุกปี</option>';
+    Array.from(years).sort((a,b) => b-a).forEach(y => {
+        yearSelect.innerHTML += `<option value="${y}">${y}</option>`;
+    });
+    
+    // Extract dynamic months from data
+    const months = new Set();
+    jobs.forEach(j => {
+        const mRecv = getMonthFromDate(j.date);
+        const mClose = getMonthFromDate(j.closeDate);
+        if(mRecv) months.add(mRecv);
+        if(mClose) months.add(mClose);
+    });
+    
+    const monthNames = ["", "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+    monthSelect.innerHTML = '<option value="all">ทุกเดือน</option>';
+    Array.from(months).sort((a,b)=>a-b).forEach(m => {
+        monthSelect.innerHTML += `<option value="${m}">${monthNames[m]}</option>`;
+    });
+
+    // Default: Last Month
+    const today = new Date();
+    let defMonth = today.getMonth(); // 0 is Jan
+    let defYear = today.getFullYear() + 543;
+    
+    if (defMonth === 0) { // If currently Jan
+        defMonth = 12; // Last month is Dec
+        defYear -= 1;  // Prev year
+    }
+    
+    if (years.has(defYear)) yearSelect.value = defYear.toString();
+    else yearSelect.value = '2569'; // Fallback to prompt request
+
+    if (months.has(defMonth)) monthSelect.value = defMonth.toString();
+    else monthSelect.value = 'all'; // Fallback
+}
+
+function renderDashboardWithFilter() {
+    renderDashboard(allJobs);
+}
+
+function renderDashboard(jobs) {
+    if (!jobs) return;
+    
+    const filterYear = document.getElementById('dash-filter-year') ? document.getElementById('dash-filter-year').value : 'all';
+    const filterMonth = document.getElementById('dash-filter-month') ? document.getElementById('dash-filter-month').value : 'all';
+
+    let scopedJobs = jobs;
+    let canViewAll = ['Admin', 'Approver', 'Dispatcher'].includes(currentUser.role);
+    
+    if (!canViewAll) {
+        scopedJobs = jobs.filter(j => j.dept === currentUser.dept);
+        document.getElementById('dash-subtitle').innerText = `ข้อมูลเฉพาะแผนก ${currentUser.dept}`;
+        document.getElementById('dashboard-chart-section').classList.add('hidden');
+    } else {
+        document.getElementById('dash-subtitle').innerText = `ภาพรวมทุกแผนก`;
+        document.getElementById('dashboard-chart-section').classList.remove('hidden');
+    }
+    
+    // 1. งานเข้า: Filter by Date Received
+    const jobsReceived = scopedJobs.filter(j => isDateMatch(j.date, filterYear, filterMonth));
+    
+    // 2. งานเสร็จ: Filter by Close Date AND Status == 'ปิดงาน'
+    const jobsClosedInPeriod = scopedJobs.filter(j => {
+        const status = (j.status || '').toString().trim();
+        const isClosed = status === 'ปิดงาน' || status.includes('ปิดงาน');
+        return isClosed && isDateMatch(j.closeDate, filterYear, filterMonth);
+    });
+
+    // 3. งานค้าง (Current snapshot - Ignore Date Filter)
+    const jobsPendingCurrent = scopedJobs.filter(j => {
+        const status = (j.status || '').toString();
+        return (status.includes('ระหว่าง') || status.includes('รอ') || status.includes('ดำเนินการ')) 
+               && !status.includes('ปิด') && !status.includes('เสร็จ') && !status.includes('ยกเลิก') && !status.includes('ไม่อนุมัติ');
+    });
+
+    animateValue("stat-total", 0, jobsReceived.length, 1000);
+    animateValue("stat-closed", 0, jobsClosedInPeriod.length, 1000);
+    animateValue("stat-pending-total", 0, jobsPendingCurrent.length, 1000);
+
+    // Aging Analysis (From pending jobs only)
+    let ageLt3 = 0, age3to6 = 0, age6to12 = 0, ageGt1 = 0;
+    
+    jobsPendingCurrent.forEach(j => {
+        // [FIX] Priority 1: Use explicitly defined duration from sheet if valid.
+        let months = parseFloat(j.duration);
+        
+        // [FIX] Priority 2: If sheet duration is invalid/empty, fallback to date calc.
+        if (isNaN(months) || months < 0) {
+            months = calculateMonthDiff(j.date);
+        }
+
+        // Apply strict conditions
+        if (months <= 3) ageLt3++;
+        else if (months > 3 && months <= 6) age3to6++;
+        else if (months > 6 && months <= 12) age6to12++;
+        else ageGt1++;
+    });
+    
+    animateValue("age-lt3", 0, ageLt3, 1000);
+    animateValue("age-3to6", 0, age3to6, 1000);
+    animateValue("age-6to12", 0, age6to12, 1000);
+    animateValue("age-gt1", 0, ageGt1, 1000);
+
+    const now = new Date();
+    document.getElementById('last-update-time').innerText = `Update: ${now.toLocaleDateString('th-TH')} ${now.toLocaleTimeString('th-TH')}`;
+    
+    updateDashboardData(scopedJobs, jobsReceived, jobsClosedInPeriod, jobsPendingCurrent);
+    
+    if(canViewAll) {
+        updateCharts({
+            deptData: getAggregatedDeptData(scopedJobs, jobsReceived, jobsClosedInPeriod, jobsPendingCurrent),
+            aging: { lt3: ageLt3, b36: age3to6, b612: age6to12, gt1: ageGt1 }
+        });
+    }
+}
+
+function getAggregatedDeptData(allScoped, receivedSet, closedSet, pendingSet) {
+    const depts = ['ผซก.1', 'ผซก.2', 'ผทค.', 'ผซค.', 'ผพจ.', 'ผจส.']; 
+    const foundDepts = new Set([...depts]);
+    allScoped.forEach(j => { if(j.dept && j.dept !== '-') foundDepts.add(j.dept) });
+    
+    const deptData = {};
+    foundDepts.forEach(d => {
+        deptData[d] = { received: 0, closed: 0, pending: 0, aging: { lt3:0, b36:0, b612:0, gt1:0 } };
+    });
+
+    receivedSet.forEach(j => { if(deptData[j.dept]) deptData[j.dept].received++; });
+    closedSet.forEach(j => { if(deptData[j.dept]) deptData[j.dept].closed++; });
+    
+    pendingSet.forEach(j => {
+        if(deptData[j.dept]) {
+            deptData[j.dept].pending++;
+            let months = parseFloat(j.duration);
+            if (isNaN(months) || months < 0) months = calculateMonthDiff(j.date);
+
+            if (months <= 3) deptData[j.dept].aging.lt3++;
+            else if (months > 3 && months <= 6) deptData[j.dept].aging.b36++;
+            else if (months > 6 && months <= 12) deptData[j.dept].aging.b612++;
+            else deptData[j.dept].aging.gt1++;
+        }
+    });
+    return deptData;
+}
+
+function updateDashboardData(allScoped, receivedSet, closedSet, pendingSet) {
+    const deptData = getAggregatedDeptData(allScoped, receivedSet, closedSet, pendingSet);
+    updateDashboardTable(deptData);
+}
+
+function updateDashboardTable(deptData) {
+    const tbody = document.getElementById('dashboard-matrix-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+
+    const definedOrder = ['ผซก.1', 'ผซก.2', 'ผทค.', 'ผซค.', 'ผพจ.', 'ผจส.'];
+    const allKeys = Object.keys(deptData);
+    const sortedKeys = [...definedOrder, ...allKeys.filter(k => !definedOrder.includes(k))];
+
+    let gRec = 0, gClosed = 0, gLt3 = 0, g36 = 0, g612 = 0, gGt1 = 0, gPending = 0;
+
+    sortedKeys.forEach(dept => {
+        const d = deptData[dept];
+        if (!d) return; 
+        if (currentUser.role === 'Staff' && dept !== currentUser.dept) return; 
+        
+        gRec += d.received; gClosed += d.closed; 
+        gLt3 += d.aging.lt3; g36 += d.aging.b36; g612 += d.aging.b612; gGt1 += d.aging.gt1; 
+        gPending += d.pending;
+
+        const tr = document.createElement('tr');
+        tr.className = "hover:bg-slate-50 transition border-b border-slate-50 last:border-0";
+        tr.innerHTML = `
+            <td class="p-3 font-bold text-slate-700 bg-indigo-50/20 pl-6">${dept}</td>
+            <td class="p-3 text-center font-bold text-indigo-600 bg-indigo-50/30">${d.received}</td>
+            <td class="p-3 text-center font-bold text-emerald-600 bg-emerald-50/30">${d.closed}</td>
+            <td class="p-3 text-center text-slate-600 border-l border-slate-100">${d.aging.lt3 || '-'}</td>
+            <td class="p-3 text-center text-slate-600">${d.aging.b36 || '-'}</td>
+            <td class="p-3 text-center text-slate-600">${d.aging.b612 || '-'}</td>
+            <td class="p-3 text-center text-red-500 font-medium">${d.aging.gt1 || '-'}</td>
+            <td class="p-3 text-center font-bold text-orange-600 bg-orange-50/30 border-l border-slate-100">${d.pending}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+
+    const trFooter = document.createElement('tr');
+    trFooter.className = "bg-slate-100 font-bold text-slate-800";
+    trFooter.innerHTML = `
+        <td class="p-3 text-center pl-6">รวม</td>
+        <td class="p-3 text-center text-indigo-700">${gRec}</td>
+        <td class="p-3 text-center text-emerald-700">${gClosed}</td>
+        <td class="p-3 text-center border-l border-slate-200">${gLt3}</td>
+        <td class="p-3 text-center">${g36}</td>
+        <td class="p-3 text-center">${g612}</td>
+        <td class="p-3 text-center text-red-600">${gGt1}</td>
+        <td class="p-3 text-center text-orange-700 border-l border-slate-200">${gPending}</td>
+    `;
+    tbody.appendChild(trFooter);
+}
+
+function updateCharts(statsData) {
+    const labels = Object.keys(statsData.deptData);
+    const dataRec = labels.map(d => statsData.deptData[d].received);
+    const dataClosed = labels.map(d => statsData.deptData[d].closed);
+    const dataPending = labels.map(d => statsData.deptData[d].pending);
+
+    const ctxDept = document.getElementById('deptChart').getContext('2d');
+    if (deptChartInstance) deptChartInstance.destroy();
+    
+    deptChartInstance = new Chart(ctxDept, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                { label: 'งานเข้า', data: dataRec, backgroundColor: '#6366f1', borderRadius: 4 }, 
+                { label: 'งานเสร็จ', data: dataClosed, backgroundColor: '#10b981', borderRadius: 4 }, 
+                { label: 'งานค้าง', data: dataPending, backgroundColor: '#f59e0b', borderRadius: 4 } 
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: { y: { beginAtZero: true } }, 
+            plugins: { legend: { position: 'bottom' } }
+        }
+    });
+
+    const ctxAging = document.getElementById('agingChart').getContext('2d');
+    if (agingChartInstance) agingChartInstance.destroy();
+
+    agingChartInstance = new Chart(ctxAging, {
+        type: 'doughnut',
+        data: {
+            labels: ['< 3 เดือน', '3-6 เดือน', '6-12 เดือน', '> 1 ปี'],
+            datasets: [{
+                data: [statsData.aging.lt3, statsData.aging.b36, statsData.aging.b612, statsData.aging.gt1],
+                backgroundColor: ['#4ade80', '#facc15', '#fb923c', '#ef4444'],
+                borderWidth: 0,
+                hoverOffset: 4
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            cutout: '70%',
+            plugins: { legend: { position: 'right' } }
+        }
+    });
+}
+
+function calculateMonthDiff(dateStr) {
+    if (!dateStr || dateStr === '-') return 0;
+    try {
+        let jobDate;
+        if (dateStr.includes('/')) {
+            let parts = dateStr.split('/');
+            if (parts.length === 3) {
+                let day = parseInt(parts[0], 10);
+                let month = parseInt(parts[1], 10) - 1;
+                let year = parseInt(parts[2], 10);
+                if (year > 2400) year -= 543;
+                jobDate = new Date(year, month, day);
+            } else { jobDate = new Date(dateStr); }
+        } else {
+            jobDate = new Date(dateStr);
+        }
+        
+        if (isNaN(jobDate.getTime())) return 0;
+        
+        const today = new Date();
+        const diffTime = today.getTime() - jobDate.getTime();
+        if (diffTime < 0) return 0; // Future date fallback
+        return diffTime / (1000 * 60 * 60 * 24 * 30.44);
+    } catch(e) { return 0; }
+}
+
+function isDateMatch(dateStr, fYear, fMonth) {
+    if (!dateStr || dateStr === '-' || dateStr === '') return false;
+    if (fYear !== 'all') {
+        const y = getYearFromDate(dateStr);
+        if (!y || y.toString() !== fYear) return false;
+    }
+    if (fMonth !== 'all') {
+        const m = getMonthFromDate(dateStr);
+        if (!m || m.toString() !== fMonth) return false;
+    }
+    return true;
+}
+
+// ==========================================
+// 6. JOB LIST FILTERING & VIEWS
+// ==========================================
+function filterJobPage(type, title) {
+    currentStatusFilter = type;
+    document.getElementById('job-page-title').innerText = title;
+    selectedScorecard = null;
+    
+    // View Config
+    const isPendingView = (type === 'pending');
+    document.getElementById('job-table-container').classList.toggle('hidden', isPendingView);
+    document.getElementById('job-ticket-container').classList.toggle('hidden', !isPendingView);
+
+    // Filters Visibility & Auto-Expand
+    const showHistory = ['closed', 'cancelled'].includes(type);
+    
+    const panel = document.getElementById('filter-panel');
+    const yearWrapper = document.getElementById('filter-year-wrapper');
+    const monthWrapper = document.getElementById('filter-month-wrapper');
+    
+    if (showHistory) {
+        panel.classList.remove('hidden');
+        panel.classList.add('flex');
+        if(yearWrapper) yearWrapper.classList.remove('hidden');
+        if(monthWrapper) monthWrapper.classList.remove('hidden');
+        
+        const yearSelect = document.getElementById('filter-year');
+        if(yearSelect && yearSelect.value === 'all') yearSelect.value = '2569';
+    } else {
+        panel.classList.add('hidden');
+        panel.classList.remove('flex');
+    }
+    
+    const sc = document.getElementById('active-job-scorecards');
+    if(type === 'active') sc.classList.remove('hidden'); else sc.classList.add('hidden');
+
+    showPage('job-list'); 
+    applyFilters(); 
+    updateActiveNav(event.currentTarget);
+}
+
+function applyFilters() {
+    let filtered = allJobs;
+    // 1. Dept
+    if (currentUser) {
+        if (['Staff','Dispatcher'].includes(currentUser.role)) filtered = filtered.filter(j => j.dept === currentUser.dept);
+        else if (['Admin','Approver'].includes(currentUser.role)) {
+            if (currentDeptFilter) filtered = filtered.filter(j => j.dept === currentDeptFilter);
+            else filtered = [];
+        }
+    }
+    
+    // Render Active Scorecards
+    if (currentStatusFilter === 'active') { renderActiveScorecards(filtered); }
+
+    // 2. Status Menu
+    if (currentStatusFilter !== 'all') {
+        if (currentStatusFilter === 'active') filtered = filtered.filter(j => (j.status||'').includes('ระหว่างดำเนินการ'));
+        else if (currentStatusFilter === 'pending') filtered = filtered.filter(j => (j.status||'').includes('ขออนุมัติ'));
+        else if (currentStatusFilter === 'closed') filtered = filtered.filter(j => {
+             const st = (j.status||'').trim();
+             return st === 'ปิดงาน' || st.includes('เสร็จสิ้น');
+        });
+        else if (currentStatusFilter === 'cancelled') filtered = filtered.filter(j => (j.status||'').includes('ยกเลิก'));
+    }
+
+    // 3. Dropdown & Scorecard Filters
+    const fYear = document.getElementById('filter-year') ? document.getElementById('filter-year').value : 'all';
+    const fMonth = document.getElementById('filter-month') ? document.getElementById('filter-month').value : 'all';
+    const search = document.getElementById('search-input') ? document.getElementById('search-input').value.toLowerCase() : '';
+
+    if (currentStatusFilter === 'active') {
+        if (selectedScorecard) {
+            filtered = filtered.filter(j => (j.pendingType||'').trim() === selectedScorecard);
+        }
+    }
+    
+    if (['closed', 'cancelled'].includes(currentStatusFilter)) {
+        if (fYear !== 'all') filtered = filtered.filter(j => { const y = getYearFromDate(j.closeDate); return y && y.toString() === fYear; });
+        if (fMonth !== 'all') filtered = filtered.filter(j => { const m = getMonthFromDate(j.closeDate); return m && m.toString() === fMonth; });
+    }
+
+    if (search) filtered = filtered.filter(j => (j.id||'').toLowerCase().includes(search) || (j.desc||'').toLowerCase().includes(search) || (j.sender||'').toLowerCase().includes(search));
+
+    if (currentStatusFilter === 'pending') renderTickets(filtered);
+    else renderTable(filtered);
+}
+
+// ==========================================
+// 7. RENDER TABLES & TICKETS
+// ==========================================
+function renderActiveScorecards(jobs) {
+    const container = document.getElementById('active-job-scorecards');
+    if (!container) return;
+    
+    const activeJobs = jobs.filter(j => (j.status||'').includes('ระหว่างดำเนินการ'));
+    const types = [
+        { name: 'ตรวจสอบรายละเอียด', icon: 'fa-magnifying-glass', color: 'blue', label: 'ตรวจสอบรายละเอียด' },
+        { name: 'จัดหาอะไหล่ (เบิก, จัดซื้อ/จ้าง, ส่งมอบ)', icon: 'fa-box-open', color: 'orange', label: 'จัดหาอะไหล่' },
+        { name: 'รอดำเนินการ', icon: 'fa-clock', color: 'yellow', label: 'รอดำเนินการ' },
+        { name: 'ดำเนินการ', icon: 'fa-screwdriver-wrench', color: 'cyan', label: 'ดำเนินการ' },
+        { name: 'ปิดงาน (ค่าใช้จ่าย/ประวัติ/แจ้งงานเสร็จ)', icon: 'fa-clipboard-check', color: 'green', label: 'ปิดงาน' }
+    ];
+    
+    container.innerHTML = '';
+    
+    types.forEach(t => {
+        const count = activeJobs.filter(j => (j.pendingType||'').trim() === t.name).length;
+        const isSelected = (selectedScorecard === t.name);
+        
+        const div = document.createElement('div');
+        const baseClass = "p-4 rounded-xl border shadow-sm transition cursor-pointer group flex flex-col justify-between select-none";
+        const selectedClass = isSelected 
+            ? `bg-${t.color}-50 border-${t.color}-300 ring-2 ring-${t.color}-200 shadow-md` 
+            : `bg-white border-slate-100 hover:bg-slate-50 hover:shadow-md`;
+            
+        div.className = `${baseClass} ${selectedClass}`;
+        div.onclick = () => { 
+            selectedScorecard = (selectedScorecard === t.name) ? null : t.name;
+            applyFilters();
+        };
+        
+        div.innerHTML = `
+            <div class="flex justify-between items-center mb-2">
+                <span class="text-xs font-bold ${isSelected ? `text-${t.color}-700` : 'text-slate-400'} uppercase tracking-wide truncate" title="${t.name}">${t.label}</span>
+                <div class="w-8 h-8 rounded-lg ${isSelected ? `bg-white text-${t.color}-600` : `bg-${t.color}-50 text-${t.color}-600`} flex items-center justify-center transition-transform group-hover:scale-110 shrink-0">
+                    <i class="fa-solid ${t.icon}"></i>
+                </div>
+            </div>
+            <h3 class="text-3xl font-bold ${isSelected ? `text-${t.color}-800` : 'text-slate-800'} font-num">${count}</h3>
+        `;
+        container.appendChild(div);
+    });
+    
+    container.classList.remove('hidden');
+}
+
+function renderTable(jobs) {
+  const tbody = document.getElementById('job-table-body');
+  const countDisplay = document.getElementById('job-count-display');
+  if(!tbody) return;
+  
+  tbody.innerHTML = '';
+  if(countDisplay) countDisplay.innerText = `${jobs.length} รายการ`;
+  
+  const isHistory = ['closed', 'cancelled'].includes(currentStatusFilter);
+  const isActive = (currentStatusFilter === 'active');
+  
+  // Headers Display Logic
+  const thJobType = document.getElementById('th-jobtype');
+  const thPendingType = document.getElementById('th-pending-type');
+  const thPendingDesc = document.getElementById('th-pending-desc');
+  const thApprover = document.getElementById('th-approver');
+  const thCloseDate = document.getElementById('th-closedate');
+  
+  if (isHistory) {
+      if(thPendingType) thPendingType.classList.add('hidden');
+      if(thPendingDesc) thPendingDesc.classList.add('hidden');
+      if(thJobType) thJobType.classList.remove('hidden');
+      if(thApprover) thApprover.classList.remove('hidden');
+      if(thCloseDate) thCloseDate.classList.remove('hidden');
+  } else {
+      if(thPendingType) thPendingType.classList.remove('hidden');
+      if(thPendingDesc) thPendingDesc.classList.remove('hidden');
+      if(thJobType) thJobType.classList.remove('hidden');
+      
+      if(isActive) {
+          if(thApprover) thApprover.classList.add('hidden');
+          if(thCloseDate) thCloseDate.classList.add('hidden');
+      } else {
+          if(thApprover) thApprover.classList.remove('hidden');
+          if(thCloseDate) thCloseDate.classList.remove('hidden');
+      }
+  }
+
+  if (!jobs || jobs.length === 0) {
+    const colspan = isActive ? 11 : 12;
+    tbody.innerHTML = `<tr><td colspan="${colspan}" class="text-center p-12 text-slate-400 bg-slate-50/50 italic">ไม่พบข้อมูลตามเงื่อนไข</td></tr>`;
+    return;
+  }
+
+  jobs.forEach((job, index) => {
+    const tr = document.createElement('tr');
+    tr.className = 'transition duration-150 ease-in-out row-animate hover:bg-slate-50 cursor-pointer border-b border-slate-50 last:border-0';
+    tr.style.animationDelay = `${Math.min(index * 0.02, 0.5)}s`;
+    tr.addEventListener('click', function() { openJobDetail(job.id); });
+    
+    const respHtml = job.responsible.avatar 
+        ? `<div class="flex items-center gap-2"><img src="${job.responsible.avatar}" class="w-6 h-6 rounded-full object-cover"><span class="text-sm text-slate-700 truncate max-w-[120px]">${job.responsible.name}</span></div>`
+        : `<div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-500 text-xs"><i class="fa-solid fa-user"></i></div><span class="text-sm text-slate-700 truncate max-w-[120px]">${job.responsible.name}</span></div>`;
+    const appHtml = job.approver.avatar
+        ? `<div class="flex items-center gap-2"><img src="${job.approver.avatar}" class="w-6 h-6 rounded-full object-cover"><span class="text-sm text-slate-700 truncate max-w-[120px]">${job.approver.name}</span></div>`
+        : `<span class="text-sm text-slate-600 truncate max-w-[120px]">${job.approver.name}</span>`;
+
+    const jobTypeCell = `<td class="p-4 text-slate-600 font-medium ${isHistory || isActive ? '' : ''}">${job.jobType || '-'}</td>`; 
+    const pendingCells = isHistory ? '' : `<td class="p-4">${getPendingTypeBadge(job.pendingType)}</td><td class="p-4 text-slate-500 text-xs truncate max-w-[150px]" title="${job.pendingDesc}">${job.pendingDesc === '-' ? '' : job.pendingDesc}</td>`;
+    const endCells = isActive ? '' : `<td class="p-4 text-sm text-slate-600 truncate max-w-[120px]">${appHtml}</td><td class="p-4 text-slate-500 font-num text-sm whitespace-nowrap">${formatDate(job.closeDate)}</td>`;
+
+    tr.innerHTML = `
+      <td class="p-4 pl-6 sticky-col bg-white"><span class="font-bold text-indigo-700 font-num text-sm group-hover:text-indigo-800 transition-colors">${job.id}</span></td>
+      <td class="p-4 text-slate-600 text-sm truncate max-w-xs font-medium" title="${job.desc}">${job.desc}</td>
+      ${jobTypeCell}
+      ${pendingCells}
+      <td class="p-4 text-slate-600 font-num text-sm whitespace-nowrap"><i class="fa-regular fa-calendar text-slate-400 mr-1.5 text-xs"></i>${formatDate(job.date)}</td>
+      <td class="p-4 text-slate-600 font-num text-sm text-center">${job.duration === '-' ? '-' : job.duration + ' เดือน'}</td>
+      <td class="p-4"><div class="flex items-center gap-2"><div class="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 text-xs"><i class="fa-solid fa-building"></i></div><span class="text-sm text-slate-700">${job.sender}</span></div></td>
+      <td class="p-4">${respHtml}</td>
+      <td class="p-4 text-center">${getStatusBadge(job.status)}</td>
+      ${endCells}
+      <td class="p-4 text-center text-slate-400"><i class="fa-solid fa-chevron-right text-xs opacity-50 group-hover:opacity-100 transition-opacity"></i></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderTickets(jobs) { 
+    const container = document.getElementById('job-ticket-container'); 
+    const countDisplay = document.getElementById('job-count-display'); 
+    if(!container) return; 
+    
+    container.innerHTML = ''; 
+    if(countDisplay) countDisplay.innerText = `${jobs.length} รายการ`; 
+    
+    if (!jobs || jobs.length === 0) { 
+        container.innerHTML = `<div class="col-span-full p-12 text-center text-slate-400 bg-slate-50/50 rounded-xl border border-slate-100 italic">ไม่พบข้อมูลงานรออนุมัติ</div>`; 
+        return; 
+    } 
+    
+    jobs.forEach(job => { 
+        const div = document.createElement('div'); 
+        div.className = "bg-white rounded-xl shadow-sm border border-slate-200 p-5 hover:shadow-md transition group animate-fade-in cursor-pointer"; 
+        div.onclick = () => openJobDetail(job.id); 
+        
+        const avatar = job.responsible.avatar ? `<img src="${job.responsible.avatar}" class="w-8 h-8 rounded-full object-cover border border-slate-100">` : `<div class="w-8 h-8 rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center text-xs"><i class="fa-solid fa-user"></i></div>`; 
+        
+        div.innerHTML = `
+            <div class="flex justify-between items-start mb-3">
+                <span class="bg-indigo-50 text-indigo-700 text-xs font-bold px-2 py-1 rounded border border-indigo-100 font-num">${job.id}</span>
+                ${getStatusBadge(job.status)}
+            </div>
+            <h3 class="font-bold text-slate-800 mb-1 line-clamp-2 min-h-[3rem] text-sm group-hover:text-indigo-700 transition">${job.desc}</h3>
+            <div class="space-y-2 mt-4 pt-4 border-t border-slate-50 text-xs text-slate-500">
+                <div class="flex items-center gap-2"><i class="fa-solid fa-building w-4 text-center"></i> <span>${job.dept} -> ${job.sender}</span></div>
+                <div class="flex items-center gap-2"><i class="fa-regular fa-calendar w-4 text-center"></i> <span class="font-num">${formatDate(job.date)}</span></div>
+                <div class="flex items-center justify-between mt-2">
+                    <div class="flex items-center gap-2">${avatar}<span class="truncate max-w-[100px]">${job.responsible.name}</span></div>
+                    <span class="text-indigo-600 bg-indigo-50 px-2 py-1 rounded text-[10px] font-bold">ตรวจสอบ <i class="fa-solid fa-arrow-right ml-1"></i></span>
+                </div>
+            </div>`; 
+        container.appendChild(div); 
+    }); 
+}
+
+// ==========================================
+// 8. HELPERS & UTILS
+// ==========================================
+function setDeptFilter(dept) { currentDeptFilter = dept; document.querySelectorAll('.dept-filter-btn').forEach(btn => { const isSelected = btn.getAttribute('data-dept') === dept; if (isSelected) { btn.classList.remove('bg-white', 'text-slate-600', 'border-slate-200'); btn.classList.add('bg-indigo-600', 'text-white', 'border-indigo-600', 'shadow-md'); } else { btn.classList.add('bg-white', 'text-slate-600', 'border-slate-200'); btn.classList.remove('bg-indigo-600', 'text-white', 'border-indigo-600', 'shadow-md'); } }); applyFilters(); }
+function resetFilters() { selectedScorecard = null; if(document.getElementById('filter-year')) document.getElementById('filter-year').value = ['closed','cancelled'].includes(currentStatusFilter)?'2569':'all'; if(document.getElementById('filter-month')) document.getElementById('filter-month').value = 'all'; if(document.getElementById('search-input')) document.getElementById('search-input').value = ''; applyFilters(); }
+function populateYearOptions(jobs) { const s1 = document.getElementById('filter-year'); const s2 = document.getElementById('dash-filter-year'); const y=new Set(); y.add(2569); y.add(2568); y.add(2567); jobs.forEach(j=>{const yr=getYearFromDate(j.closeDate); if(yr)y.add(yr); const yr2=getYearFromDate(j.date); if(yr2)y.add(yr2); }); const html = '<option value="all">ทั้งหมด/ทุกปี</option>' + Array.from(y).sort((a,b)=>b-a).map(yr => `<option value="${yr}">${yr}</option>`).join(''); if(s1) s1.innerHTML = html; if(s2 && s2.options.length <= 1) { s2.innerHTML = html; s2.value = '2569'; } }
+function getYearFromDate(dateStr) { if (!dateStr || dateStr === '-') return null; try { let year; if (dateStr.includes('/')) { year = parseInt(dateStr.split('/')[2], 10); } else { year = new Date(dateStr).getFullYear(); } if (year < 2400) year += 543; return year; } catch(e) {} return null; }
+function getMonthFromDate(dateStr) { if (!dateStr || dateStr === '-') return null; try { if (dateStr.includes('/')) { return parseInt(dateStr.split('/')[1], 10); } else { return new Date(dateStr).getMonth() + 1; } } catch(e) {} return null; }
+function sortJobs(key) { if (!sortDirection[key]) sortDirection[key] = 1; else sortDirection[key] *= -1; const dir = sortDirection[key]; const parseDate = (d) => { if (!d || d === '-') return 0; try { return new Date(d).getTime(); } catch(e) { return 0; } }; const getValue = (job, k) => { if (k === 'responsible') return job.responsible.name || ''; if (k === 'approver') return job.approver.name || ''; if (k === 'date' || k === 'closeDate') return parseDate(job[k]); if (k === 'duration') return parseFloat(job.duration) || 0; return (job[k] || '').toString().toLowerCase(); }; allJobs.sort((a, b) => { const valA = getValue(a, key); const valB = getValue(b, key); if (valA < valB) return -1 * dir; if (valA > valB) return 1 * dir; return 0; }); document.querySelectorAll('th i.fa-sort, th i.fa-sort-up, th i.fa-sort-down').forEach(i => i.className = 'fa-solid fa-sort ml-1 text-slate-300'); const icon = document.querySelector(`th[onclick="sortJobs('${key}')"] i`); if(icon) { icon.className = dir === 1 ? 'fa-solid fa-sort-up ml-1 text-indigo-600' : 'fa-solid fa-sort-down ml-1 text-indigo-600'; } applyFilters(); }
+function getPendingTypeBadge(type) { if (!type || type === '-') return '<span class="text-slate-400 text-xs">-</span>'; let c = 'bg-slate-100 text-slate-600 border-slate-200'; let i = 'fa-circle-question'; if (type.includes('อะไหล่') || type.includes('วัสดุ')) { c = 'bg-orange-50 text-orange-700 border-orange-200'; i = 'fa-box-open'; } else if (type.includes('ตรวจสอบ') || type.includes('รอ')) { c = 'bg-blue-50 text-blue-700 border-blue-200'; i = 'fa-magnifying-glass'; } else if (type.includes('ซ่อม') || type.includes('ดำเนินการ')) { c = 'bg-cyan-50 text-cyan-700 border-cyan-200'; i = 'fa-screwdriver-wrench'; } else if (type.includes('อนุมัติ')) { c = 'bg-purple-50 text-purple-700 border-purple-200'; i = 'fa-user-check'; } return `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border ${c}"><i class="fa-solid ${i} text-[10px] opacity-70"></i> ${type}</span>`; }
+function getStatusBadge(status) { if (!status) return '<span class="text-slate-400">-</span>'; let c = 'bg-slate-100 text-slate-600 border-slate-200'; let i = 'fa-circle'; if (status.includes('ระหว่าง')) { c = 'bg-yellow-50 text-yellow-700 border-yellow-200'; i = 'fa-clock'; } else if (status.includes('อนุมัติ')) { c = 'bg-purple-50 text-purple-700 border-purple-200'; i = 'fa-hourglass-half'; } else if (status.includes('ปิด') || status.includes('เสร็จ')) { c = 'bg-green-50 text-green-700 border-green-200'; i = 'fa-check-circle'; } else if (status.includes('ยกเลิก') || status.includes('ไม่')) { c = 'bg-red-50 text-red-700 border-red-200'; i = 'fa-ban'; } return `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border shadow-sm ${c}"><i class="fa-solid ${i} text-[10px]"></i> ${status}</span>`; }
+function animateValue(id,s,e,d) { const o = document.getElementById(id); if(!o) return; if(s===e) { o.innerText = e; return; } let st = null; const stp = (t) => { if (!st) st = t; const p = Math.min((t - st) / d, 1); o.innerHTML = Math.floor(p * (e - s) + s); if (p < 1) window.requestAnimationFrame(stp); }; window.requestAnimationFrame(stp); }
+function formatDate(dateStr) { if (!dateStr || dateStr === '-') return '-'; try { const d = new Date(dateStr); if(isNaN(d.getTime())) return dateStr; let year = d.getFullYear(); if (year < 2400) year += 543; const day = String(d.getDate()).padStart(2, '0'); const month = String(d.getMonth() + 1).padStart(2, '0'); return `${day}/${month}/${year}`; } catch(e) { return dateStr; } }
+
+// ==========================================
+// 9. MODALS & SUB-DATA 
+// ==========================================
+function loadUsersData() { const e = document.getElementById('loading-users'); if(e) e.classList.remove('hidden'); google.script.run.withSuccessHandler(r => { if(e) e.classList.add('hidden'); if (r.status === 'success') { allUsers = r.data; renderUserTable(allUsers); loadImagesSequentially(allUsers); } }).getAllUsers(); }
+function renderUserTable(users) { const tbody = document.getElementById('user-table-body'); tbody.innerHTML = ''; users.forEach(u => { const tr = document.createElement('tr'); tr.className = 'border-b border-slate-50 hover:bg-slate-50 transition'; let roleBadge = '<span class="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-bold">User</span>'; if(u.role === 'Admin') roleBadge = '<span class="bg-red-100 text-red-600 px-2 py-1 rounded text-xs font-bold">Admin</span>'; else if(u.role === 'Manager') roleBadge = '<span class="bg-purple-100 text-purple-600 px-2 py-1 rounded text-xs font-bold">Manager</span>'; let avatarHtml; if (u.cachedImg) { avatarHtml = `<img src="${u.cachedImg}" class="w-8 h-8 rounded-full object-cover border border-slate-200">`; } else { avatarHtml = `<div id="avatar-${u.id}" class="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-slate-400"><i class="fa-solid fa-user"></i></div>`; } tr.innerHTML = `<td class="p-4 pl-6">${avatarHtml}</td><td class="p-4 font-bold text-slate-700 font-num">${u.id}</td><td class="p-4 text-slate-600">${u.name}</td><td class="p-4"><span class="bg-white border border-slate-200 px-2 py-1 rounded text-xs text-slate-500">${u.dept}</span></td><td class="p-4 text-slate-500 text-sm">${u.position}</td><td class="p-4 text-center">${roleBadge}</td><td class="p-4 text-center"><button class="btn-edit-user text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 p-2 rounded-lg transition" data-user-id="${u.id}"><i class="fa-solid fa-pen-to-square"></i></button></td>`; tr.querySelector('.btn-edit-user').onclick = () => openEditUserModal(u); tbody.appendChild(tr); }); }
+function loadImagesSequentially(users, index = 0) { if (index >= users.length) return; const user = users[index]; if (user.cachedImg || !user.rawImgPath || user.rawImgPath === '-' || user.rawImgPath === '') { loadImagesSequentially(users, index + 1); return; } google.script.run.withSuccessHandler(res => { if (res.status === 'success' && res.image) { user.cachedImg = res.image; const div = document.getElementById(`avatar-${user.id}`); if (div) div.outerHTML = `<img src="${res.image}" class="w-8 h-8 rounded-full object-cover border border-slate-200 animate-fade-in">`; } loadImagesSequentially(users, index + 1); }).getOneUserImage(user.rawImgPath); }
+function refreshUsers() { const btn = event.currentTarget.querySelector('i'); btn.classList.add('fa-spin'); allUsers = []; loadUsersData(); setTimeout(() => btn.classList.remove('fa-spin'), 1000); }
+function openEditUserModal(user) { document.getElementById('edit-user-id').value = user.id; document.getElementById('edit-user-id-hidden').value = user.id; document.getElementById('edit-user-name').value = user.name; document.getElementById('edit-user-pass').value = user.password; document.getElementById('edit-user-role').value = user.role; document.getElementById('edit-user-dept').value = user.dept; document.getElementById('edit-user-pos').value = user.position; const preview = document.getElementById('edit-user-preview'); const icon = document.getElementById('edit-user-icon'); if (user.cachedImg) { preview.src = user.cachedImg; preview.classList.remove('hidden'); icon.classList.add('hidden'); } else if (user.avatar && user.avatar.startsWith('data:')) { preview.src = user.avatar; preview.classList.remove('hidden'); icon.classList.add('hidden'); } else { preview.classList.add('hidden'); icon.classList.remove('hidden'); } adminEditUserImageBase64 = null; openModal('edit-user-modal'); }
+function submitEditUser(e) { e.preventDefault(); const t = document.getElementById('edit-user-id-hidden').value; const r = { name: document.getElementById('edit-user-name').value, password: document.getElementById('edit-user-pass').value, role: document.getElementById('edit-user-role').value, dept: document.getElementById('edit-user-dept').value, position: document.getElementById('edit-user-pos').value, newImageBase64: adminEditUserImageBase64, newImageName: adminEditUserImageName }; document.getElementById('edit-user-spinner').classList.remove('hidden'); google.script.run.withSuccessHandler(e => { document.getElementById('edit-user-spinner').classList.add('hidden'); if (e.status === 'success') { Swal.fire('สำเร็จ', 'บันทึกข้อมูลเรียบร้อย', 'success'); closeModal('edit-user-modal'); refreshUsers(); } else { Swal.fire('Error', e.message, 'error'); } }).updateUser(t, r); }
+function openModal(id) { const m = document.getElementById(id); const c = m.querySelector('div'); if(id==='create-job-modal') document.getElementById('create-job-form').reset(); m.classList.remove('hidden'); setTimeout(()=>{m.classList.remove('opacity-0'); c.classList.remove('opacity-0','scale-95'); c.classList.add('scale-100');},10); }
+function closeModal(id) { const m = document.getElementById(id); const c = m.querySelector('div'); m.classList.add('opacity-0'); c.classList.add('opacity-0','scale-95'); c.classList.remove('scale-100'); setTimeout(()=>{m.classList.add('hidden');},300); }
+function openCreateJobModal() { openModal('create-job-modal'); }
+function switchTab(id) { const t = document.querySelectorAll('.tab-content'); const g = document.getElementById(id); t.forEach(e=>e.classList.add('hidden')); g.classList.remove('hidden'); g.classList.add('animate-fade-in'); document.querySelectorAll('.tab-btn').forEach(e=>{e.classList.remove('border-indigo-600','text-indigo-600'); e.classList.add('border-transparent','text-slate-500');}); event.currentTarget.classList.remove('border-transparent','text-slate-500'); event.currentTarget.classList.add('border-indigo-600','text-indigo-600'); }
+function submitNewJob(e) { e.preventDefault(); const f = document.getElementById('create-job-form'); const d = { dept: f.elements['แผนกเจ้าของเรื่อง'].value, sender: f.elements['ผู้ส่งงาน'].value, desc: f.elements['รายละเอียดงาน'].value }; document.getElementById('create-spinner').classList.remove('hidden'); google.script.run.withSuccessHandler(res=>{ document.getElementById('create-spinner').classList.add('hidden'); if(res.status==='success') { Swal.fire('สำเร็จ', 'สร้างงานเรียบร้อย', 'success'); closeModal('create-job-modal'); loadJobsData(); } else { Swal.fire('Error', res.message, 'error'); } }).createNewJob(d); }
+function requestCloseJob() { Swal.fire({ title: 'ยืนยันการขอปิดงาน?', text: "สถานะจะเปลี่ยนเป็น 'รออนุมัติปิดงาน'", icon: 'question', showCancelButton: true, confirmButtonColor: '#16a34a', cancelButtonColor: '#94a3b8', confirmButtonText: 'ยืนยัน', cancelButtonText: 'ยกเลิก' }).then((r) => { if (r.isConfirmed) { google.script.run.withSuccessHandler(() => { Swal.fire('สำเร็จ', 'ส่งคำขอเรียบร้อย', 'success'); closeModal('job-detail-modal'); loadJobsData(); }).updateJobStatus(currentJobId, 'รออนุมัติปิดงาน'); } }); }
+function approveJob() { Swal.fire({ title: 'อนุมัติการปิดงาน?', icon: 'question', showCancelButton: true, confirmButtonColor: '#4f46e5', cancelButtonColor: '#94a3b8', confirmButtonText: 'อนุมัติ', cancelButtonText: 'ยกเลิก' }).then((r) => { if (r.isConfirmed) { google.script.run.withSuccessHandler(() => { Swal.fire('สำเร็จ', 'อนุมัติเรียบร้อย', 'success'); closeModal('job-detail-modal'); loadJobsData(); }).updateJobStatus(currentJobId, 'ปิดงาน'); } }); }
+function openJobDetail(id) { currentJobId = id; const j = allJobs.find(x=>x.id===id); if(!j) return; document.getElementById('detail-job-id').innerText = j.id; document.getElementById('detail-job-status').innerText = j.status; document.getElementById('view-dept').innerText = j.dept; document.getElementById('view-sender').innerText = j.sender; document.getElementById('view-date').innerText = formatDate(j.date); document.getElementById('view-desc').innerText = j.desc; const a = document.getElementById('action-area'); const s = document.querySelector('.btn-staff-only'); const ap = document.querySelectorAll('.btn-approver-only'); if(a) a.classList.add('hidden'); if(s) s.classList.add('hidden'); if(ap) ap.forEach(b=>b.classList.add('hidden')); if(currentUser){ const my = j.dept===currentUser.dept; const act = !(j.status||'').includes('ปิด')&&!(j.status||'').includes('ยกเลิก'); if(currentUser.role==='Staff' && my && act){ if(a) a.classList.remove('hidden'); if(s) s.classList.remove('hidden'); } if(currentUser.role==='Approver' && (j.status||'').includes('อนุมัติ')){ if(a) a.classList.remove('hidden'); if(ap) ap.forEach(b=>b.classList.remove('hidden')); } if(currentUser.role==='Admin'){ if(a) a.classList.remove('hidden'); } } loadSubData(id); openModal('job-detail-modal'); }
+function loadSubData(id) { const opsDiv = document.getElementById('ops-list'); opsDiv.innerHTML = '<div class="text-center py-4 text-slate-400"><i class="fa-solid fa-circle-notch fa-spin text-indigo-500"></i> Loading...</div>'; google.script.run.withSuccessHandler(res => { if (res.status === 'success') { if (!res.data.operations || res.data.operations.length === 0) opsDiv.innerHTML = '<div class="text-center text-slate-400 py-4 text-sm bg-slate-50 rounded-lg border border-slate-100">ไม่มีประวัติการปฏิบัติงาน</div>'; else opsDiv.innerHTML = res.data.operations.map((op, i) => `<div class="bg-white p-4 border border-slate-100 rounded-lg shadow-sm mb-2 row-animate" style="animation-delay: ${i*0.1}s"><div class="flex justify-between font-bold text-slate-700 text-sm mb-1"><span class="font-num text-slate-500">${formatDate(op.date)}</span><span class="text-indigo-600">${op.location}</span></div><div class="text-slate-600 text-sm leading-relaxed">${op.detail}</div><div class="text-xs text-slate-400 mt-2 flex items-center gap-1"><i class="fa-solid fa-user"></i> ${op.workers.map(w=>w.name).join(', ')}</div></div>`).join(''); const partsBody = document.getElementById('parts-table-body'); if(partsBody) { if (!res.data.parts || res.data.parts.length === 0) partsBody.innerHTML = '<tr><td colspan="4" class="text-center py-6 text-slate-400 text-sm">ไม่มีรายการเบิก</td></tr>'; else partsBody.innerHTML = res.data.parts.map((p, i) => `<tr class="border-b border-slate-50 row-animate hover:bg-slate-50" style="animation-delay: ${i*0.1}s"><td class="p-3 pl-5 text-slate-700">${p.item}</td><td class="p-3 text-center font-num text-slate-600">${p.qty}</td><td class="p-3 text-right font-num text-slate-600">${p.price}</td><td class="p-3 text-center font-num text-slate-500 text-xs">${formatDate(p.date)}</td></tr>`).join(''); } } }).getJobDetailWithRelations(id); }
+function addLog() { Swal.fire('Coming Soon', 'ระบบบันทึกกำลังพัฒนา', 'info'); }
+function addPart() { Swal.fire('Coming Soon', 'ระบบเบิกอะไหล่กำลังพัฒนา', 'info'); }
+function handleImagePreview(input, type) { if (input.files && input.files[0]) { const file = input.files[0]; const reader = new FileReader(); reader.onload = function(e) { if (type === 'edit-profile') { newProfileImageName = file.name; newProfileImageBase64 = e.target.result; document.getElementById('edit-profile-preview').src = e.target.result; document.getElementById('edit-profile-preview').classList.remove('hidden'); document.getElementById('edit-profile-icon').classList.add('hidden'); } else if (type === 'edit-user') { adminEditUserImageName = file.name; adminEditUserImageBase64 = e.target.result; document.getElementById('edit-user-preview').src = e.target.result; document.getElementById('edit-user-preview').classList.remove('hidden'); document.getElementById('edit-user-icon').classList.add('hidden'); } }; reader.readAsDataURL(file); } }
+function submitEditProfile(e) { e.preventDefault(); const data = { name: document.getElementById('ep-name').value, position: document.getElementById('ep-pos').value, newImageBase64: newProfileImageBase64, newImageName: newProfileImageName }; const pass = document.getElementById('ep-pass').value; if (pass) data.password = pass; document.getElementById('ep-spinner').classList.remove('hidden'); google.script.run.withSuccessHandler(res => { document.getElementById('ep-spinner').classList.add('hidden'); if (res.status === 'success') { Swal.fire('สำเร็จ', 'บันทึกข้อมูลเรียบร้อย กรุณาเข้าสู่ระบบใหม่', 'success').then(() => { logout(); }); } else { Swal.fire('Error', res.message, 'error'); } }).updateUser(currentUser.id, data); }
+function renderProfile() { if (!currentUser) return; document.getElementById('profile-name').innerText = currentUser.name; document.getElementById('profile-id').innerText = currentUser.id; document.getElementById('profile-role').innerText = currentUser.role; document.getElementById('profile-dept').innerText = currentUser.dept; document.getElementById('profile-pos').innerText = currentUser.position || '-'; const pAvatar = document.getElementById('profile-avatar-display'); const pIcon = document.getElementById('profile-icon-display'); if (currentUser.avatar) { pAvatar.src = currentUser.avatar; pAvatar.classList.remove('hidden'); pIcon.classList.add('hidden'); } else { pAvatar.classList.add('hidden'); pIcon.classList.remove('hidden'); } switchMyJobsTab('active'); }
+function switchMyJobsTab(statusType) { document.querySelectorAll('.my-job-tab').forEach(btn => { btn.classList.remove('border-indigo-600', 'text-indigo-600', 'bg-white'); btn.classList.add('border-transparent', 'text-slate-500'); }); event.currentTarget.classList.remove('border-transparent', 'text-slate-500'); event.currentTarget.classList.add('border-indigo-600', 'text-indigo-600', 'bg-white'); const myJobs = allJobs.filter(j => j.responsible.name === currentUser.name); let filtered = []; if (statusType === 'active') { filtered = myJobs.filter(j => (j.status||'').includes('ระหว่าง') || (j.status||'').includes('อนุมัติ')); } else if (statusType === 'closed') { filtered = myJobs.filter(j => (j.status||'').includes('ปิด') || (j.status||'').includes('เสร็จ')); } else if (statusType === 'cancelled') { filtered = myJobs.filter(j => (j.status||'').includes('ยกเลิก')); } const container = document.getElementById('my-jobs-list'); container.innerHTML = ''; if (filtered.length === 0) { container.innerHTML = `<div class="p-8 text-center text-slate-400 bg-white">ไม่มีรายการงานในหมวดนี้</div>`; return; } filtered.forEach(job => { const div = document.createElement('div'); div.className = 'p-4 hover:bg-slate-50 cursor-pointer transition flex justify-between items-center group border-b border-slate-50 last:border-0'; div.onclick = () => openJobDetail(job.id); div.innerHTML = `<div class="flex items-start gap-4"><div class="w-10 h-10 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center font-bold text-xs shrink-0 font-num">${job.id.split('/')[1] || job.id}</div><div><h4 class="text-sm font-bold text-slate-700 mb-1 group-hover:text-indigo-700 transition truncate max-w-[200px] md:max-w-md">${job.desc}</h4><div class="flex flex-wrap gap-2 text-xs text-slate-500"><span class="flex items-center gap-1 font-num"><i class="fa-regular fa-calendar"></i> ${formatDate(job.date)}</span><span class="flex items-center gap-1"><i class="fa-solid fa-building"></i> ${job.sender}</span></div></div></div><div>${getStatusBadge(job.status)}</div>`; container.appendChild(div); }); }
+function openProfileEditModal() { document.getElementById('ep-id').value = currentUser.id; document.getElementById('ep-name').value = currentUser.name; document.getElementById('ep-dept').value = currentUser.dept; document.getElementById('ep-pos').value = currentUser.position || ''; document.getElementById('ep-pass').value = ''; const preview = document.getElementById('edit-profile-preview'); const icon = document.getElementById('edit-profile-icon'); if (currentUser.avatar) { preview.src = currentUser.avatar; preview.classList.remove('hidden'); icon.classList.add('hidden'); } else { preview.classList.add('hidden'); icon.classList.remove('hidden'); } newProfileImageBase64 = null; openModal('edit-profile-modal'); }
+</script>
